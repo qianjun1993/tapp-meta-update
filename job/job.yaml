@@ -1,0 +1,21 @@
+kind: Job
+apiVersion: batch/v1
+metadata:
+  name: tapp-update
+  namespace: kube-system
+spec:
+  template:
+    spec:
+      serviceAccountName: tapp-controller
+      priorityClassName: high-priority
+      restartPolicy: Never
+      containers:
+        - name: tapp-update
+          image: tapp-update:v1.3.0
+          args:
+            - "--v=3"
+          imagePullPolicy: "IfNotPresent"
+          resources:
+            requests:
+              "cpu": "1"
+              "memory": "512Mi"
