@@ -68,6 +68,8 @@ type Controller struct {
 
 	// podStoreSynced returns true if the pod store has synced at least once.
 	podStoreSynced cache.InformerSynced
+
+	updateRetries int
 }
 
 // NewController returns a new tapp controller
@@ -75,18 +77,20 @@ func NewController(
 	kubeclientset kubernetes.Interface,
 	tappclientset clientset.Interface,
 	kubeInformerFactory kubeinformers.SharedInformerFactory,
-	tappInformerFactory informers.SharedInformerFactory) *Controller {
+	tappInformerFactory informers.SharedInformerFactory,
+	updateRetries int) *Controller {
 
 	// obtain references to shared index informers for TApp and pod types.
 	tappInformer := tappInformerFactory.Tappcontroller().V1().TApps()
 	podInformer := kubeInformerFactory.Core().V1().Pods()
 
 	controller := &Controller{
-		kubeclient:  kubeclientset,
-		tappclient:  tappclientset,
-		tappLister:  tappInformer.Lister(),
-		tappsSynced: tappInformer.Informer().HasSynced,
-		tappHash:    hash.NewTappHash(),
+		kubeclient:    kubeclientset,
+		tappclient:    tappclientset,
+		tappLister:    tappInformer.Lister(),
+		tappsSynced:   tappInformer.Informer().HasSynced,
+		tappHash:      hash.NewTappHash(),
+		updateRetries: updateRetries,
 	}
 
 	klog.Info("Setting up event handlers")
@@ -98,22 +102,32 @@ func NewController(
 	return controller
 }
 
-func (c *Controller) Run(interval int, stopCh <-chan struct{}) error {
+func (c *Controller) Run(interval int, namesapce, name string, stopCh <-chan struct{}) error {
 	klog.Info("Starting tapp update")
 	if ok := cache.WaitForCacheSync(stopCh, c.podStoreSynced, c.tappsSynced); !ok {
 		return fmt.Errorf("failed to wait for caches to sync")
 	}
 
 	klog.Info("Starting workers")
-
-	tapplist, err := c.tappLister.TApps("").List(labels.Everything())
-	if err != nil {
-		return err
-	}
-	for _, tapp := range tapplist {
+	if name != "" {
+		tapp, err := c.tappLister.TApps(namesapce).Get(name)
+		if err != nil {
+			return err
+		}
 		err = c.sync(tapp)
 		if err != nil {
 			return err
+		}
+	} else {
+		tapplist, err := c.tappLister.TApps(namesapce).List(labels.Everything())
+		if err != nil {
+			return err
+		}
+		for _, tapp := range tapplist {
+			err = c.sync(tapp)
+			if err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -192,7 +206,11 @@ func (c *Controller) syncRunningPods(tapp *tappv1.TApp, desiredRunningPods sets.
 	podMap map[string]*corev1.Pod) {
 	for _, id := range desiredRunningPods.List() {
 		if pod, ok := podMap[id]; ok {
-			if !c.isTemplateHashChanged(tapp, id, pod) || c.isUniqHashChanged(tapp, id, pod) {
+			if !c.isTemplateHashChanged(tapp, id, pod) {
+				_, found := pod.Labels[hash.SpecHashKey]
+				if found {
+					continue
+				}
 				c.setSpecHash(tapp, id, pod)
 			}
 		}
@@ -233,14 +251,28 @@ func (c *Controller) setSpecHash(tapp *tappv1.TApp, podId string, pod *corev1.Po
 		return
 	}
 	specHash := c.tappHash.GetSpecHash(template.Labels)
-	pod.Labels[hash.SpecHashKey] = specHash
-	patchData := map[string]interface{}{"metadata": map[string]map[string]string{"labels": pod.Labels}}
-	playLoadBytes, _ := json.Marshal(patchData)
-	_, err = c.kubeclient.CoreV1().Pods(pod.Namespace).Patch(pod.Name, types.StrategicMergePatchType, playLoadBytes)
-	if err != nil {
-		klog.Errorf("can't patch pod %v , %v", pod.Name, err)
+
+	var cp *corev1.Pod
+	for i := 0; i <= c.updateRetries; i++ {
+		if cp, err = c.podStore.Pods(pod.Namespace).Get(pod.Name); err != nil {
+			break
+		}
+		_, found := pod.Labels[hash.SpecHashKey]
+		if found {
+			break
+		}
+		podCopy := cp.DeepCopy()
+		podCopy.Labels[hash.SpecHashKey] = specHash
+		patchData := map[string]interface{}{"metadata": map[string]map[string]string{"labels": podCopy.Labels}}
+		playLoadBytes, _ := json.Marshal(patchData)
+		klog.V(3).Infof("set spec hash for pod %x/%s", podCopy.Namespace, podCopy.Name)
+
+		_, err = c.kubeclient.CoreV1().Pods(podCopy.Namespace).Patch(podCopy.Name, types.StrategicMergePatchType, playLoadBytes)
+		if err == nil {
+			break
+		}
+		klog.Errorf("Failed to patch pod %s, will retry: %v", getPodFullName(podCopy), err)
 	}
-	klog.V(3).Infof("set spec hash for pod %x/%s", pod.Namespace, pod.Name)
 
 }
 

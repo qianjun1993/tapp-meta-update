@@ -46,12 +46,16 @@ var (
 	worker int
 
 	namespace string
+	name      string
+
+	updateRetries int
 )
 
 const (
-	defaultWorkerNumber = 5
-	defaultKubeAPIQPS   = 2000
-	defaultKubeAPIBurst = 2500
+	defaultWorkerNumber  = 5
+	defaultKubeAPIQPS    = 2000
+	defaultKubeAPIBurst  = 2500
+	defaultUpdateRetries = 3
 )
 
 func main() {
@@ -72,16 +76,16 @@ func main() {
 		klog.Fatalf("Error building example clientset: %s", err.Error())
 	}
 
-	kubeInformerFactory := kubeinformers.NewSharedInformerFactory(kubeClient, time.Second*30)
-	tappInformerFactory := informers.NewSharedInformerFactory(tappClient, time.Second*30)
+	kubeInformerFactory := kubeinformers.NewSharedInformerFactoryWithOptions(kubeClient, time.Second*30, kubeinformers.WithNamespace(namespace))
+	tappInformerFactory := informers.NewSharedInformerFactoryWithOptions(tappClient, time.Second*30, informers.WithNamespace(namespace))
 
-	controller := tappupdate.NewController(kubeClient, tappClient, kubeInformerFactory, tappInformerFactory)
+	controller := tappupdate.NewController(kubeClient, tappClient, kubeInformerFactory, tappInformerFactory, updateRetries)
 	run := func(ctx context.Context) {
 		stop := ctx.Done()
 
 		go kubeInformerFactory.Start(stop)
 		go tappInformerFactory.Start(stop)
-		if err = controller.Run(worker, stop); err != nil {
+		if err = controller.Run(worker, namespace, name, stop); err != nil {
 			klog.Fatalf("Error running controller: %s", err.Error())
 		}
 	}
@@ -106,4 +110,7 @@ func addFlags(fs *pflag.FlagSet) {
 	fs.Float32Var(&kubeAPIQPS, "kube-api-qps", defaultKubeAPIQPS, "QPS to use while talking with kubernetes apiserver")
 	fs.IntVar(&kubeAPIBurst, "kube-api-burst", defaultKubeAPIBurst, "Burst to use while talking with kubernetes apiserver")
 	fs.IntVar(&worker, "worker", defaultWorkerNumber, "TApp sync worker number, default: 5")
+	fs.StringVar(&namespace, "namespace", "", "The namespace to handle on")
+	fs.StringVar(&name, "name", "", "The name of tapp to handle on")
+	fs.IntVar(&updateRetries, "updateRetries", defaultUpdateRetries, "the number of Get/Update cycles we perform when an update fails, deault 3")
 }
