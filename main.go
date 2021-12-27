@@ -59,6 +59,10 @@ const (
 )
 
 func main() {
+	if namespace == "" && name != "" {
+		klog.Fatalf("namespace must be set for name is set")
+		return
+	}
 	cfg, err := clientcmd.BuildConfigFromFlags(masterURL, kubeconfig)
 	if err != nil {
 		klog.Fatalf("Error building kubeconfig: %s", err.Error())

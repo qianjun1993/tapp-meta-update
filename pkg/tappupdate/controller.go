@@ -255,6 +255,7 @@ func (c *Controller) setSpecHash(tapp *tappv1.TApp, podId string, pod *corev1.Po
 	var cp *corev1.Pod
 	for i := 0; i <= c.updateRetries; i++ {
 		if cp, err = c.podStore.Pods(pod.Namespace).Get(pod.Name); err != nil {
+			klog.Errorf("Failed to get pod %s, will retry: %v", getPodFullName(pod), err)
 			break
 		}
 		_, found := pod.Labels[hash.SpecHashKey]
@@ -265,7 +266,7 @@ func (c *Controller) setSpecHash(tapp *tappv1.TApp, podId string, pod *corev1.Po
 		podCopy.Labels[hash.SpecHashKey] = specHash
 		patchData := map[string]interface{}{"metadata": map[string]map[string]string{"labels": podCopy.Labels}}
 		playLoadBytes, _ := json.Marshal(patchData)
-		klog.V(3).Infof("set spec hash for pod %x/%s", podCopy.Namespace, podCopy.Name)
+		klog.V(3).Infof("set spec hash for pod %s/%s", podCopy.Namespace, podCopy.Name)
 
 		_, err = c.kubeclient.CoreV1().Pods(podCopy.Namespace).Patch(podCopy.Name, types.StrategicMergePatchType, playLoadBytes)
 		if err == nil {
